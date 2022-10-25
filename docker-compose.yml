@@ -1,0 +1,232 @@
+version: "3.8"
+services:
+  setup:
+  elasticsearch01:
+  elasticsearch02:
+  logstash:
+  filebeat:
+  kibana:
+
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELK_VERSION}
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    command: >
+      bash -c '
+        if [ x${ELASTIC_PASSWORD} == x ]; then
+          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+          exit 1;
+        elif [ x${KIBANA_PASSWORD} == x ]; then
+          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+          exit 1;
+        fi;
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs";
+          echo -ne \
+          "instances:\n"\
+          "  - name: elasticsearch01\n"\
+          "    dns:\n"\
+          "      - elasticsearch01\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          "  - name: elasticsearch02\n"\
+          "    dns:\n"\
+          "      - elasticsearch02\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+          unzip config/certs/certs.zip -d config/certs;
+        fi;
+        echo "Setting file permissions"
+        chown -R root:root config/certs;
+        find . -type d -exec chmod 750 \{\} \;;
+        find . -type f -exec chmod 640 \{\} \;;
+        echo "Waiting for Elasticsearch availability";
+        until curl -s --cacert config/certs/ca/ca.crt https://elasticsearch01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+        echo "Setting kibana_system password";
+        until curl -s -X POST --cacert config/certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} -H "Content-Type: application/json" https://elasticsearch01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
+        echo "All done!";
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/elasticsearch01/elasticsearch01.crt ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  elasticsearch01:
+    container_name: elasticsearch01
+    build:
+      context: elasticsearch/
+      args:
+       ELK_VERSION: $ELK_VERSION
+    volumes:
+      - type: bind
+        source: ./elasticsearch/elasticsearch.yml
+        target: /usr/share/elasticsearch/config/elasticsearch.yml
+        read_only: true
+      - /data/certs:/usr/share/elasticsearch/config/certs
+      - /data/elasticsearch01:/usr/share/elasticsearch/data
+    restart: always
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - cluster.name=${CLUSTER_NAME}
+      - node.name=elasticsearch01
+      - discovery.seed_hosts=elasticsearch02
+      - cluster.initial_master_nodes=elasticsearch01,elasticsearch02
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+#Is used to enable or disable TLS/SSL on the HTTP networking layer, which Elasticsearch uses to communicate with other clients. The default is false#
+      - xpack.security.http.ssl.enabled=false
+#      - xpack.security.http.ssl.key=certs/elasticsearch01/elasticsearch01.key
+#      - xpack.security.http.ssl.certificate=certs/elasticsearch01/elasticsearch01.crt
+#      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+#      - xpack.security.http.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/elasticsearch01/elasticsearch01.key
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch01/elasticsearch01.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=${LICENSE}
+      - ELASTIC_PASSWORD=$ELASTIC_PASSWORD
+      - "ES_JAVA_OPTS=-Xms${ES_HEAP_SIZE:-8g} -Xmx${ES_HEAP_SIZE:-8g}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  elasticsearch02:
+    container_name: elasticsearch02
+    build:
+      context: elasticsearch/
+      args:
+        ELK_VERSION: $ELK_VERSION
+    volumes:
+      - type: bind
+        source: ./elasticsearch/elasticsearch.yml
+        target: /usr/share/elasticsearch/config/elasticsearch.yml
+        read_only: true
+      - /data/certs:/usr/share/elasticsearch/config/certs
+      - /data/elasticsearch02:/usr/share/elasticsearch/data
+    restart: always
+    environment:
+      - cluster.name=${CLUSTER_NAME}
+      - node.name=elasticsearch02
+      - discovery.seed_hosts=elasticsearch01
+      - cluster.initial_master_nodes=elasticsearch01,elasticsearch02
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+#Is used to enable or disable TLS/SSL on the HTTP networking layer, which Elasticsearch uses to communicate with other clients. The default is false#
+      - xpack.security.http.ssl.enabled=false
+#      - xpack.security.http.ssl.key=certs/elasticsearch02/elasticsearch02.key
+#      - xpack.security.http.ssl.certificate=certs/elasticsearch02/elasticsearch02.crt
+#      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+#      - xpack.security.http.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/elasticsearch02/elasticsearch02.key
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch02/elasticsearch02.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=${LICENSE}
+      - ELASTIC_PASSWORD=$ELASTIC_PASSWORD
+      - "ES_JAVA_OPTS=-Xms${ES_HEAP_SIZE:-8g} -Xmx${ES_HEAP_SIZE:-8g}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  logstash:
+    container_name: logstash
+    build:
+      context: logstash/
+      args:
+        ELK_VERSION: 7.17.2
+    volumes:
+      - /data/certs:/usr/share/logstash/config/certs
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+      - ./logstash/pipeline:/opt/logstash/pipeline
+      - ./logstash/patterns:/opt/logstash/patterns
+    restart: always
+    ports:
+      - "5044:5044"
+      - "5045:5045"
+      - "5046:5046"
+    environment:
+      LS_JAVA_OPTS: "-Xmx${LS_HEAP_SIZE:-2048m} -Xms${LS_HEAP_SIZE:-2048m}"
+
+    depends_on:
+      - elasticsearch01
+
+  filebeat:
+    container_name: filebeat
+    build:
+      context: filebeat/
+      args:
+        ELK_VERSION: 7.17.2
+    # Run as 'root' instead of 'filebeat' (uid 1000) to allow reading
+    # 'docker.sock' and the host's filesystem.
+    user: root
+    command:
+      # Log to stderr.
+      - -e
+      # Disable config file permissions checks. Allows mounting
+      # 'config/filebeat.yml' even if it's not owned by root.
+      # see: https://www.elastic.co/guide/en/beats/libbeat/current/config-file-permissions.html
+      - --strict.perms=false
+    volumes:
+      - type: bind
+        source: ./filebeat/config/filebeat.yml
+        target: /usr/share/filebeat/filebeat.yml
+        read_only: true
+      - type: bind
+        source: /applogs
+        target: /applogs
+        read_only: true
+      - type: bind
+        source: /data/docker/containers
+        target: /var/lib/docker/containers
+        read_only: true
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+    restart: always
+    depends_on:
+      - logstash
+
+#  kibana:
+#    build:
+#      context: kibana/
+#      args:
+#        ELK_VERSION: $ELK_VERSION
+#    volumes:
+#      - type: bind
+#        source: ./kibana/kibana.yml
+#        target: /usr/share/kibana/config/kibana.yml
+#        read_only: true
+#      - /data/certs:/usr/share/kibana/config/certs
+#    ports:
+#      - 5601:5601
+#    environment:
+#      - SERVERNAME=kibana
+#      - ELASTICSEARCH_HOSTS=https://elasticsearch01:9200
+##      - ELASTICSEARCH_USERNAME=kibana_system
+##      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
+##      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+ #   depends_on:
+ #     - elasticsearch01
+
+volumes:
+  certs:
+    driver: local

@@ -1,0 +1,6 @@
+http.host: 0.0.0.0
+xpack.monitoring.elasticsearch.hosts:
+- http://172.17.17.134:9200
+xpack.monitoring.elasticsearch.password: DevElkPass123
+xpack.monitoring.elasticsearch.username: elastic
+xpack.monitoring.enabled: true
